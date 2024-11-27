@@ -6,6 +6,7 @@
 # 上傳kaggle會用F1-score評比
 import os
 import math
+import csv
 from nltk.stem import PorterStemmer
 
 #【重要變數和路徑設定】
@@ -15,6 +16,7 @@ training_txt_path = 'training.txt'
 training_data = [] 
 testing_data = []
 tokenized_training_data = {}
+tokenized_testing_data = {}
 dictionary = set()
 feature_number = 500
 selected_features = []
@@ -37,26 +39,9 @@ for file_name in os.listdir(document_folder):
         training_data.append(full_path)
     else:
         testing_data.append(full_path)
-# print("Training Data:", training_data)
-# print("Testing Data:", testing_data)
-
-#【定義找document class函式】
-def GetClassFromFile(file_path, training_txt_path):
-    file_name = os.path.splitext(os.path.basename(file_path))[0]  # 提取檔案代號 (不含副檔名)
-    with open(training_txt_path, 'r') as file:
-        for line in file:
-            parts = line.strip().split()  # 將每行拆分成列表
-            class_label = parts[0]  # 第一個欄位是類別
-            file_numbers = parts[1:]  # 後續欄位是該類別的檔案號碼
-            
-            if file_name in file_numbers: 
-                return class_label 
-
-    # 如果找不到，返回 None 或報錯
-    raise ValueError(f"File {file_name} not found in {training_txt_path}")
 
 
-# 【定義tokenization函式, 對training data做tokenization, 找出dictionary】
+# 【定義tokenization函式】
 def tokenization(file_path):
     with open(stopwords_file, 'r', encoding='utf-8') as file:
         stop_words = file.read().split() 
@@ -79,18 +64,30 @@ def tokenization(file_path):
     stemmed_tokens = [ps.stem(token) for token in cleaned_tokens]
     return stemmed_tokens
 
+#【定義找document class函式】
+def GetClassFromFile(file_path, training_txt_path):
+    file_name = os.path.splitext(os.path.basename(file_path))[0]  # 提取檔案代號 (不含副檔名)
+    with open(training_txt_path, 'r') as file:
+        for line in file:
+            parts = line.strip().split()  # 將每行拆分成列表
+            class_label = parts[0]  # 第一個欄位是類別
+            file_numbers = parts[1:]  # 後續欄位是該類別的檔案號碼
+            
+            if file_name in file_numbers: 
+                return class_label 
 
-# 【定義feature selection, Likelihood Ratio, 從dictionary中篩選出前500重要的term】
+    # 如果找不到，返回 None 或報錯
+    raise ValueError(f"File {file_name} not found in {training_txt_path}")
+
+
+# 【定義feature selection, Likelihood Ratio, 給dictionary的每個term一個score】
 def ComputeFeatureUtility(documents, terms, classes):
-    n11 = n10 = n01 = n00 = 1
+    print(f"Feature score computing")
+    n11 = n10 = n01 = n00 = 0
 
     for file_path in documents:
-        tokens = tokenized_training_data[file_path]
+        tokens = documents[file_path]
         file_class = GetClassFromFile(file_path, training_txt_path)
-
-        print(f"Processing file: {file_path}")
-        # print(f"Tokens: {tokens}")
-        print(f"Class: {file_class}")
         
         for c in classes:
             if terms in tokens and file_class == str(c):
@@ -101,9 +98,9 @@ def ComputeFeatureUtility(documents, terms, classes):
                 n01 += 1
             elif terms not in tokens and file_class != str(c):
                 n00 += 1
-            print(f"Class: {c}, n11: {n11}, n10: {n10}, n01: {n01}, n00: {n00}")
+            # print(f"Class: {c}, n11: {n11}, n10: {n10}, n01: {n01}, n00: {n00}")
 
-    N = n11 + n10 + n01 + n00 + 4
+    N = n11 + n10 + n01 + n00
 
     p1 = (n11 + n01) / (N)
     p2 = n11 / (n11 + n10)
@@ -132,8 +129,8 @@ def ComputeFeatureUtility(documents, terms, classes):
 
 
 # 【定義multinomial NB classifier, training phase, return model parameters】
-def TrainMultinomialNB(classes, training_data, vocabulary):
-    N = len(training_data)  # 總文件數
+def TrainMultinomialNB(classes, document, vocabulary):
+    N = len(document)  # 總文件數
     prior = {}  # P(c)
     condprob = {}  # P(X=t|c)
 
@@ -144,14 +141,14 @@ def TrainMultinomialNB(classes, training_data, vocabulary):
     # 針對每個類別計算 prior 和 condprob
     for c in classes:
         # 計算 Nc: 該類別的文件數量
-        Nc = CountDocsInClass(training_data, c)
+        Nc = CountDocsInClass(document, c)
 
         # 計算 P(c): 該類別的先驗概率
         prior[c] = Nc / N
         print(f"Class {c}: Prior = {prior[c]}")
 
-        # 將屬於該類別的所有文件內容連接成一個 text，同時做tokenization
-        text_c = ConcatenateTextOfAllDocsInClass(training_data, c)
+        # 將屬於該類別的所有文件內容連接成一個 text
+        text_c = ConcatenateTextOfAllDocsInClass(document, c)
 
         # 計算該類別下 vocabulary 中每個詞的出現次數
         T_c = len(text_c)  # 該類別中所有詞的總數
@@ -159,27 +156,24 @@ def TrainMultinomialNB(classes, training_data, vocabulary):
             T_ct = text_c.count(t)  # 詞 t 在類別 c 的總出現次數
             # 使用 Laplace Smoothing 計算 P(X=t|c)
             condprob[t][c] = (T_ct + 1) / (T_c + 1)
-            if t in list(vocabulary)[:10]:  # 控制印出的詞數量，避免太多
-                print(f"  Term '{t}' in Class {c}: CondProb = {condprob[t][c]}")
 
     return prior, condprob
 
-def CountDocsInClass(training_data, c):
+def CountDocsInClass(document, c):
     count = 0
-    for file_path in training_data:
-        file_class = GetClassFromFile(file_path, 'training.txt')
+    for file_path in document:
+        file_class = GetClassFromFile(file_path, training_txt_path)
         if file_class == str(c):
             count += 1
     return count
 
-def ConcatenateTextOfAllDocsInClass(training_data, c):
+def ConcatenateTextOfAllDocsInClass(document, c):
     concatenated_text = []
-    for file_path in training_data:
+    for file_path in document:
         # 確認文件所屬類別
-        file_class = GetClassFromFile(file_path, 'training.txt')
+        file_class = GetClassFromFile(file_path, training_txt_path)
         if file_class == str(c):  # 類別匹配
-            # 對文件進行 tokenization，並將結果合併到 concatenated_text 中
-            tokens = tokenized_training_data[file_path]
+            tokens = document[file_path]
             concatenated_text.extend(tokens)
     return concatenated_text
 
@@ -207,36 +201,47 @@ def ApplyMultinomialNB(classes, vocabulary, prior, condprob, test_file):
 
 
 
-# 【主程式, 呼叫前面的函式】
+# 【主程式】
 #step1. tokenization
 for file_path in training_data:
     tokens_result = tokenization(file_path)
     dictionary.update(tokens_result)
     tokenized_training_data[file_path] = tokens_result
 
+for file_path in testing_data:
+    tokens_result = tokenization(file_path)
+    tokenized_testing_data[file_path] = tokens_result
+
 #step2. feature selection
 score_list = []
 for t in dictionary:
-        score = ComputeFeatureUtility(training_data, t, class_set)
+        score = ComputeFeatureUtility(tokenized_training_data, t, class_set)
         score_list.append((t, score))
 
-sorted_features = sorted(score_list, key=lambda x: x[1], reverse=True)
+sorted_features = sorted(score_list, key=lambda x: x[1], reverse=False)
 selected = sorted_features[:feature_number]
 selected_features = [t[0] for t in selected]
 print(selected_features)
 
 # step3. train multinomial NB classifier
-prior, condprob = TrainMultinomialNB(class_set, training_data, dictionary)
+prior, condprob = TrainMultinomialNB(class_set, tokenized_training_data, selected_features)
 
-#step4. presict並輸出
+# Step 4: Predict 並直接輸出成 CSV
 results = {}
-output_file = "predictions.txt"
-with open(output_file, 'w', encoding='utf-8') as file:
-    for test_file in testing_data:
+output_file = "submission.csv"
+with open(output_file, 'w', newline='', encoding='utf-8') as file:
+    csv_writer = csv.writer(file)
+    csv_writer.writerow(["Id", "Value"])
+    
+    for test_file in tokenized_testing_data:
         predicted_class = ApplyMultinomialNB(class_set, selected_features, prior, condprob, test_file)
         results[test_file] = predicted_class
-        file.write(f"{test_file} {predicted_class}\n")
+        
+        file_id = test_file.replace("IRTM\\", "").replace(".txt", "")
+        
+        csv_writer.writerow([file_id, predicted_class])
 
 print(f"Predictions written to {output_file}")
+
 
 
